@@ -1,0 +1,80 @@
+/* Global settings for spacing and margins */
+.main .block-container {
+    padding-top: 2.5rem;
+    padding-bottom: 2.5rem;
+    max-width: 1200px;
+}
+
+/* Modernize Streamlit Metric Cards */
+[data-testid="stMetric"] {
+    background-color: #130e0e;
+    padding: 20px;
+    border-radius: 12px;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+[data-testid="stMetric"]:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+/* Style Metric labels and values */
+[data-testid="stMetricLabel"] {
+    font-size: 0.875rem !important;
+    font-weight: 600 !important;
+    color: #f1f2f4 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+[data-testid="stMetricValue"] {
+    font-size: 1.75rem !important;
+    font-weight: 700 !important;
+    color: #e1e2e4 !important;
+    margin-top: 4px;
+}
+
+/* Modern Bordered Containers (Cards) */
+[data-testid="stElementContainer"] div[data-testid="stVerticalBlockBorderWrapper"] {
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0 !important;
+    border-radius: 12px !important;
+    padding: 24px !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+/* Base button styling overrides */
+.stButton>button {
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    padding: 0.5rem 1rem !important;
+    transition: all 0.2s ease !important;
+}
+
+/* Primary "Action" Button Styling */
+.stButton>button[kind="primary"] {
+    background-color: #2563eb !important;
+    border-color: #2563eb !important;
+    color: #ffffff !important;
+}
+
+.stButton>button[kind="primary"]:hover {
+    background-color: #1d4ed8 !important;
+    border-color: #1d4ed8 !important;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+}
+
+/* Custom Alert/Info Banners styling */
+.stAlert {
+    border-radius: 10px !important;
+    border: none !important;
+    background-color: #f1f5f9 !important;
+}
+
+/* Smooth out the sidebar navigation */
+[data-testid="stSidebar"] {
+    background-color: #031a31;
+    border-right: 1px solid #e2e8f0;
+}

@@ -1,69 +1,195 @@
+"""
+FinAI Analytics — Real spending analytics powered by Pandas, Plotly, and Gemini.
+"""
+
 import streamlit as st
 import pandas as pd
-import numpy as np
+import plotly.express as px
+import logging
+import json
+
+from utils.database import initialize_database, get_all_expenses, get_database_stats
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Analytics | FinAI", page_icon="📊", layout="wide")
+initialize_database()
+
 st.title("📊 Spending Analytics")
 st.markdown("Visualize your spending habits, trends, and monthly breakdowns.")
 
-# KPI Row
+# ── Load data ─────────────────────────────────────────────────────────────────
+expenses = get_all_expenses()
+
+if not expenses:
+    st.info("📭 No expense data yet. Upload some receipts to see analytics!")
+    st.stop()
+
+df = pd.DataFrame(expenses)
+df["total_amount"] = pd.to_numeric(df["total_amount"], errors="coerce").fillna(0)
+df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
+df = df.dropna(subset=["transaction_date"])
+df["month"] = df["transaction_date"].dt.to_period("M").astype(str)
+df["week"] = df["transaction_date"].dt.to_period("W").astype(str)
+df["day"] = df["transaction_date"].dt.date
+
+# ── KPI Row ───────────────────────────────────────────────────────────────────
+stats = get_database_stats()
+total = stats["total"] or 0.0
+count = stats["count"] or 0
+avg_daily = (
+    df.groupby("day")["total_amount"].sum().mean()
+    if not df.empty else 0.0
+)
+top_cat = (
+    df.groupby("category")["total_amount"].sum().idxmax()
+    if not df.empty else "—"
+)
+top_cat_pct = (
+    df.groupby("category")["total_amount"].sum().max() / total * 100
+    if total > 0 else 0
+)
+
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 with kpi1:
-    st.metric("Total Monthly Spend", "$5,294.15", "+$412.10 MoM")
+    with st.container(border=True):
+        st.metric("Total Spent (All Time)", f"${total:,.2f}")
 with kpi2:
-    st.metric("Top Category", "Software / SaaS", "45% of total")
+    with st.container(border=True):
+        st.metric("Top Category", top_cat, f"{top_cat_pct:.0f}% of total")
 with kpi3:
-    st.metric("Average Daily Spend", "$88.23", "-3.1% vs last week")
+    with st.container(border=True):
+        st.metric("Average Daily Spend", f"${avg_daily:,.2f}")
 with kpi4:
-    st.metric("Flagged Anomalies", "1 Item", "Requires Review")
+    with st.container(border=True):
+        st.metric("Total Receipts", str(count))
 
 st.divider()
 
-# Charts Grid Layout
+# ── Charts ────────────────────────────────────────────────────────────────────
 col_left, col_right = st.columns(2)
 
 with col_left:
+    # Spending by category
     st.markdown("#### 🏢 Spending by Category")
-    cat_data = pd.DataFrame(
-        {"Amount ($)": [2400, 1200, 600, 800, 294]},
-        index=["Software / SaaS", "Travel & Transit", "Office Utilities", "Meals", "Misc"]
+    cat_df = df.groupby("category")["total_amount"].sum().reset_index()
+    cat_df.columns = ["Category", "Amount"]
+    cat_df = cat_df.sort_values("Amount", ascending=False)
+    fig_cat = px.bar(
+        cat_df, x="Category", y="Amount",
+        color="Amount", color_continuous_scale="Blues",
+        labels={"Amount": "Amount ($)"},
     )
-    st.bar_chart(cat_data, y="Amount ($)", color="#1f77b4")
+    fig_cat.update_layout(showlegend=False, coloraxis_showscale=False)
+    st.plotly_chart(fig_cat, use_container_width=True)
 
+    # Monthly trend
     st.markdown("#### 📅 Monthly Trend")
-    monthly_data = pd.DataFrame(
-        {"Spend ($)": [4100, 4800, 3900, 5100, 4600, 5294]},
-        index=["Jan", "Feb", "Mar", "Apr", "May", "Jun"]
+    monthly_df = df.groupby("month")["total_amount"].sum().reset_index()
+    monthly_df.columns = ["Month", "Spend"]
+    monthly_df = monthly_df.sort_values("Month")
+    fig_monthly = px.line(
+        monthly_df, x="Month", y="Spend",
+        markers=True, labels={"Spend": "Spend ($)"}
     )
-    st.line_chart(monthly_data)
+    st.plotly_chart(fig_monthly, use_container_width=True)
 
 with col_right:
+    # Weekly trend
     st.markdown("#### 📈 Weekly Trend")
-    weekly_data = pd.DataFrame(
-        {"Cumulative Spend ($)": np.random.randn(20).cumsum() + 500},
-        columns=["Cumulative Spend ($)"]
+    weekly_df = df.groupby("week")["total_amount"].sum().reset_index()
+    weekly_df.columns = ["Week", "Spend"]
+    weekly_df = weekly_df.sort_values("Week")
+    weekly_df["Cumulative"] = weekly_df["Spend"].cumsum()
+    fig_weekly = px.area(
+        weekly_df, x="Week", y="Cumulative",
+        labels={"Cumulative": "Cumulative Spend ($)"}
     )
-    st.area_chart(weekly_data)
+    st.plotly_chart(fig_weekly, use_container_width=True)
 
+    # Top merchants
     st.markdown("#### 🏆 Top Merchants")
-    merchant_data = pd.DataFrame({
-        "Merchant": ["AWS", "Acme Corp", "Uber", "GitHub", "Staples"],
-        "Total Spent ($)": [1850.00, 1200.00, 640.50, 400.00, 312.40]
-    }).set_index("Merchant")
-    st.bar_chart(merchant_data, horizontal=True, color="#2ca02c")
+    merchant_df = (
+        df.groupby("merchant_name")["total_amount"].sum()
+        .reset_index()
+        .sort_values("total_amount", ascending=True)
+        .tail(10)
+    )
+    merchant_df.columns = ["Merchant", "Total"]
+    fig_merch = px.bar(
+        merchant_df, x="Total", y="Merchant",
+        orientation="h", labels={"Total": "Total ($)"},
+        color="Total", color_continuous_scale="Greens",
+    )
+    fig_merch.update_layout(showlegend=False, coloraxis_showscale=False)
+    st.plotly_chart(fig_merch, use_container_width=True)
 
 st.divider()
 
-# --- AI INSIGHTS ---
+# ── Gemini AI Insights ────────────────────────────────────────────────────────
 st.subheader("🧠 Gemini Financial Insights")
-with st.container(border=True):
-    st.markdown("""
-    * **🚀 Software SaaS Alert:** Software subscriptions make up **45%** of your total budget. Look out for duplicate user licenses between *GitHub* and *Acme Corp*.
-    * **⚠️ Travel Spike:** Travel expenses rose by **18%** in week 3 due to last-minute flights.
-    * **💡 Savings Tip:** Switching a few background server infrastructure pieces to lower tiers could save roughly $300 next month.
-    """)
-    st.caption("Insights generated automatically by analyzing your transaction history with Gemini.")
+
+if st.button("✨ Generate AI Insights", type="primary"):
+    with st.spinner("Analyzing your spending with Gemini..."):
+        try:
+            from huggingface_hub import InferenceClient
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+
+            # Build a summary for the model
+            summary_rows = df[["transaction_date", "merchant_name", "category", "total_amount"]].copy()
+            summary_rows["transaction_date"] = summary_rows["transaction_date"].astype(str)
+            summary_json = summary_rows.tail(50).to_dict(orient="records")
+
+            prompt = f"""
+You are a personal finance advisor.
+
+Analyze the following expense data and provide:
+1. Key spending patterns (2-3 bullet points)
+2. Any anomalies or concerns
+3. Actionable savings tips (2-3 specific suggestions)
+
+Expense data (most recent 50 transactions):
+{json.dumps(summary_json, indent=2)}
+
+Keep the response concise and practical.
+"""
+            client = InferenceClient(
+                model="Qwen/Qwen2.5-VL-7B-Instruct",
+                token=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
+            )
+            response = client.chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are a personal finance advisor."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+            reply = response.choices[0].message.content
+
+            with st.container(border=True):
+                st.markdown(reply)
+                st.caption("Insights generated by Qwen2.5-VL-7B-Instruct based on your transaction history.")
+
+        except Exception as e:
+            st.error(f"Could not generate insights: {e}")
+else:
+    with st.container(border=True):
+        st.caption("Click the button above to generate AI-powered insights from your transaction history.")
 
 st.divider()
-if st.button("📥 Download Full Analytics Report", use_container_width=True):
-    st.toast("Generating report...")
+
+# ── Download Report ───────────────────────────────────────────────────────────
+report_df = df[["transaction_date", "merchant_name", "category", "total_amount", "confidence_score"]].copy()
+report_df.columns = ["Date", "Merchant", "Category", "Amount", "Confidence"]
+csv_report = report_df.to_csv(index=False)
+
+st.download_button(
+    label="📥 Download Full Analytics Report (CSV)",
+    data=csv_report,
+    file_name="finai_analytics_report.csv",
+    mime="text/csv",
+    use_container_width=True,
+)

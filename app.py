@@ -1,5 +1,11 @@
-import streamlit as st
+"""
+FinAI - AI Powered Expense Tracker
+Main dashboard entry point.
+"""
+
 import os
+import streamlit as st
+from utils.database import initialize_database, get_database_stats
 
 # 1. Page Configuration
 st.set_page_config(
@@ -10,41 +16,52 @@ st.set_page_config(
 )
 
 # 2. Load Custom CSS
-def load_css(file_path):
+def load_css(file_path: str) -> None:
     if os.path.exists(file_path):
         with open(file_path, "r") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     else:
-        # Fallback styles if the CSS file doesn't exist yet
         st.markdown("""
             <style>
                 .main .block-container { padding-top: 2rem; }
-                .stMetric { background-color: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #e9ecef; }
             </style>
         """, unsafe_allow_html=True)
 
 load_css("assets/styles.css")
 
-# 3. Sidebar
+# 3. Initialize DB on startup
+initialize_database()
+
+# 4. Sidebar
 st.sidebar.markdown("# 💼 FinAI Tracker")
 st.sidebar.markdown("AI expense tracking powered by **Gemini**.")
 st.sidebar.divider()
 
-# 4. Main Dashboard
+# 5. Main Dashboard
 st.title("🚀 Welcome to FinAI")
 st.markdown("Extract, track, and analyze your expenses instantly using AI.")
 st.divider()
 
-# KPI Metrics Row
+# 6. Live KPI Metrics
+stats = get_database_stats()
+count = stats["count"]
+total = stats["total"]
+date_range = (
+    f"{stats['earliest']} – {stats['latest']}"
+    if stats["earliest"] and stats["latest"]
+    else "No data yet"
+)
+avg = (total / count) if count > 0 else 0.0
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric(label="Total Spent This Month", value="$2,450.80", delta="+12%")
+    st.metric(label="Total Spent (All Time)", value=f"${total:,.2f}")
 with col2:
-    st.metric(label="Receipts Processed", value="42", delta="100% Accuracy")
+    st.metric(label="Receipts Processed", value=str(count))
 with col3:
-    st.metric(label="Pending Review", value="3", delta="-2", delta_color="inverse")
+    st.metric(label="Average Transaction", value=f"${avg:,.2f}")
 with col4:
-    st.metric(label="Budget Used", value="68%", delta="Good Standing")
+    st.metric(label="Date Range", value=date_range if count > 0 else "—")
 
 st.markdown("### ⚡ Quick Actions")
 action_col1, action_col2, action_col3 = st.columns(3)
