@@ -1,5 +1,13 @@
 """
 SQLite database layer for FinAI expense tracker.
+
+Migration strategy
+------------------
+initialize_database() is called on every app startup. It first runs
+CREATE TABLE IF NOT EXISTS (safe for fresh installs), then calls
+_migrate() which uses ALTER TABLE ADD COLUMN to add any columns that
+exist in the schema but are missing from the live table. This means
+existing expenses.db files are automatically upgraded without data loss.
 """
 
 import sqlite3
@@ -14,6 +22,34 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = "expenses.db"
 
+# ── Complete column definition (single source of truth) ─────────────────────
+# Every column the app uses lives here. initialize_database() creates the
+# table with these columns; _migrate() adds any that are missing from an
+# existing DB.
+
+ALL_COLUMNS = [
+    ("id",               "INTEGER PRIMARY KEY AUTOINCREMENT"),
+    ("merchant_name",    "TEXT"),
+    ("merchant_address", "TEXT"),
+    ("invoice_number",   "TEXT"),
+    ("transaction_date", "TEXT"),
+    ("transaction_time", "TEXT"),
+    ("category",         "TEXT"),
+    ("currency",         "TEXT"),
+    ("payment_method",   "TEXT"),
+    ("line_items",       "TEXT"),      # JSON array
+    ("tax_breakdown",    "TEXT"),      # JSON array
+    ("subtotal",         "REAL"),
+    ("discount_amount",  "REAL"),
+    ("tax_amount",       "REAL"),
+    ("total_amount",     "REAL"),
+    ("confidence_score", "REAL"),
+    ("created_at",       "TEXT DEFAULT CURRENT_TIMESTAMP"),
+]
+
+# Columns that cannot be added via ALTER TABLE (PRIMARY KEY, DEFAULT with function)
+_NON_ALTERABLE = {"id", "created_at"}
+
 
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -21,36 +57,46 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _get_existing_columns(conn: sqlite3.Connection) -> set:
+    rows = conn.execute("PRAGMA table_info(expenses)").fetchall()
+    return {r["name"] for r in rows}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any missing columns to an existing expenses table."""
+    existing = _get_existing_columns(conn)
+    for col_name, col_def in ALL_COLUMNS:
+        if col_name in _NON_ALTERABLE:
+            continue
+        if col_name not in existing:
+            # Strip DEFAULT clause for ALTER TABLE (SQLite restriction on some defaults)
+            safe_def = col_def.split("DEFAULT")[0].strip()
+            sql = f"ALTER TABLE expenses ADD COLUMN {col_name} {safe_def}"
+            conn.execute(sql)
+            logger.info(f"Migration: added column '{col_name}'")
+    conn.commit()
+
+
 def initialize_database() -> None:
-    """Create tables if they don't exist."""
+    """Create the expenses table if needed, then migrate missing columns."""
+    col_defs = ",\n                ".join(
+        f"{name} {defn}" for name, defn in ALL_COLUMNS
+    )
+    create_sql = f"""
+        CREATE TABLE IF NOT EXISTS expenses (
+            {col_defs}
+        )
+    """
     with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS expenses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                merchant_name TEXT,
-                transaction_date TEXT,
-                transaction_time TEXT,
-                category TEXT,
-                currency TEXT,
-                payment_method TEXT,
-                subtotal REAL,
-                discount_amount REAL,
-                tax_amount REAL,
-                total_amount REAL,
-                confidence_score REAL,
-                line_items TEXT,
-                tax_breakdown TEXT,
-                merchant_address TEXT,
-                invoice_number TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        conn.execute(create_sql)
         conn.commit()
-    logger.info("Database initialized.")
+        _migrate(conn)
+    logger.info("Database initialized and migrated.")
 
 
 def insert_expense(data: Dict[str, Any]) -> int:
     """Insert a new expense record. Returns the new row ID."""
+    # Serialize JSON fields
     line_items = data.get("line_items", [])
     if not isinstance(line_items, str):
         line_items = json.dumps([
@@ -58,37 +104,46 @@ def insert_expense(data: Dict[str, Any]) -> int:
             for item in line_items
         ])
 
+    tax_breakdown = data.get("tax_breakdown", [])
+    if not isinstance(tax_breakdown, str):
+        tax_breakdown = json.dumps([
+            item if isinstance(item, dict) else item
+            for item in tax_breakdown
+        ])
+
     with get_connection() as conn:
         cursor = conn.execute("""
             INSERT INTO expenses (
-                merchant_name, transaction_date, transaction_time, category, currency,
-                payment_method, subtotal, discount_amount, tax_amount,
-                total_amount, confidence_score, line_items, tax_breakdown,
-                merchant_address, invoice_number
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                merchant_name, merchant_address, invoice_number,
+                transaction_date, transaction_time,
+                category, currency, payment_method,
+                line_items, tax_breakdown,
+                subtotal, discount_amount, tax_amount,
+                total_amount, confidence_score
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             data.get("merchant_name"),
+            data.get("merchant_address"),
+            data.get("invoice_number"),
             data.get("transaction_date"),
             data.get("transaction_time"),
             data.get("category"),
             data.get("currency"),
             data.get("payment_method"),
+            line_items,
+            tax_breakdown,
             data.get("subtotal"),
             data.get("discount_amount"),
             data.get("tax_amount"),
             data.get("total_amount"),
             data.get("confidence_score"),
-            line_items,
-            json.dumps(data.get("tax_breakdown") or []),
-            data.get("merchant_address"),
-            data.get("invoice_number"),
         ))
         conn.commit()
         return cursor.lastrowid
 
 
 def get_all_expenses() -> List[Dict]:
-    """Return all expenses as a list of dicts."""
+    """Return all expenses ordered by date descending."""
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT * FROM expenses ORDER BY transaction_date DESC, id DESC"
@@ -105,10 +160,14 @@ def get_expense_by_id(expense_id: int) -> Optional[Dict]:
 
 
 def update_expense(expense_id: int, data: Dict[str, Any]) -> bool:
-    fields = ["merchant_name", "transaction_date", "category", "currency",
-              "payment_method", "subtotal", "discount_amount", "tax_amount",
-              "total_amount", "confidence_score"]
-    updates = {k: data[k] for k in fields if k in data}
+    updatable = [
+        "merchant_name", "merchant_address", "invoice_number",
+        "transaction_date", "transaction_time",
+        "category", "currency", "payment_method",
+        "subtotal", "discount_amount", "tax_amount",
+        "total_amount", "confidence_score",
+    ]
+    updates = {k: data[k] for k in updatable if k in data}
     if not updates:
         return False
     set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -131,9 +190,9 @@ def search_expenses(query: str) -> List[Dict]:
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT * FROM expenses
-            WHERE merchant_name LIKE ? OR category LIKE ?
+            WHERE merchant_name LIKE ? OR category LIKE ? OR merchant_address LIKE ?
             ORDER BY transaction_date DESC
-        """, (q, q)).fetchall()
+        """, (q, q, q)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -159,7 +218,7 @@ def filter_expenses(
 
 
 def export_csv() -> str:
-    """Return all expenses as a CSV string."""
+    """Return all expenses as a CSV string (JSON fields included as-is)."""
     rows = get_all_expenses()
     if not rows:
         return ""
@@ -179,8 +238,8 @@ def reset_database() -> None:
 
 def get_database_stats() -> Dict[str, Any]:
     with get_connection() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
-        total = conn.execute("SELECT SUM(total_amount) FROM expenses").fetchone()[0] or 0.0
+        count    = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
+        total    = conn.execute("SELECT SUM(total_amount) FROM expenses").fetchone()[0] or 0.0
         earliest = conn.execute("SELECT MIN(transaction_date) FROM expenses").fetchone()[0]
-        latest = conn.execute("SELECT MAX(transaction_date) FROM expenses").fetchone()[0]
+        latest   = conn.execute("SELECT MAX(transaction_date) FROM expenses").fetchone()[0]
     return {"count": count, "total": total, "earliest": earliest, "latest": latest}
