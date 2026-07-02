@@ -18,16 +18,33 @@ from utils.pdf_utils import process_pdf
 from utils.text_utils import extract_text_from_txt
 from utils import gemini_client
 from utils.prompts import ALLOWED_CATEGORIES
+from utils.ui import apply_theme, render_sidebar
 
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Upload Expense | FinAI", page_icon="📤", layout="wide")
 initialize_database()
+apply_theme()
+render_sidebar(active_page="pages/upload.py")
 
-st.title("📤 Upload New Expense")
-st.markdown("Upload a receipt or invoice and let **Gemini 2.5 Flash** extract the data instantly.")
+st.markdown(
+    """
+    <div class="page-shell">
+    <div class="hero-card">
+        <div class="hero-kicker">Receipt intake</div>
+        <h1 class="hero-title">Upload a receipt and turn it into structured expense data.</h1>
+        <p class="hero-copy">
+            Use file upload, camera capture, or pasted text. Review the extracted details in a calm,
+            high-contrast workspace built for fast correction and submission.
+        </p>
+    </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ── Ingestion Tabs ──────────────────────────────────────────────────────────
+st.markdown('<div class="section-label">Input sources</div>', unsafe_allow_html=True)
 tab_upload, tab_camera, tab_paste = st.tabs([
     "📂 Upload File",
     "📸 Camera Capture",
@@ -85,6 +102,7 @@ if active_file:
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 if has_input:
+    st.markdown('<div class="section-label">Preview and extraction</div>', unsafe_allow_html=True)
     col_left, col_right = st.columns([1, 1], gap="large")
 
     # ── LEFT: Preview ─────────────────────────────────────────────────────────

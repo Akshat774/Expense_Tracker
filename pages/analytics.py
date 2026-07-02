@@ -9,14 +9,30 @@ import logging
 import json
 
 from utils.database import initialize_database, get_all_expenses, get_database_stats
+from utils.ui import apply_theme, render_sidebar
 
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Analytics | FinAI", page_icon="📊", layout="wide")
 initialize_database()
+apply_theme()
+render_sidebar(active_page="pages/analytics.py")
 
-st.title("📊 Spending Analytics")
-st.markdown("Visualize your spending habits, trends, and monthly breakdowns.")
+st.markdown(
+    """
+    <div class="page-shell">
+    <div class="hero-card">
+        <div class="hero-kicker">Spending intelligence</div>
+        <h1 class="hero-title">See your spending patterns with a cleaner, boardroom-ready view.</h1>
+        <p class="hero-copy">
+            Explore category concentration, time trends, merchant concentration, and AI-generated
+            insights in a dark analytics layout designed for fast reading.
+        </p>
+    </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 expenses = get_all_expenses()
@@ -50,6 +66,7 @@ top_cat_pct = (
     if total > 0 else 0
 )
 
+st.markdown('<div class="section-label">Overview</div>', unsafe_allow_html=True)
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 with kpi1:
     with st.container(border=True):
@@ -67,6 +84,7 @@ with kpi4:
 st.divider()
 
 # ── Charts ────────────────────────────────────────────────────────────────────
+st.markdown('<div class="section-label">Charts</div>', unsafe_allow_html=True)
 col_left, col_right = st.columns(2)
 
 with col_left:
@@ -79,9 +97,10 @@ with col_left:
         color="Amount", color_continuous_scale="Blues",
         labels={"Amount": "Amount (₹)"},
     )
+    fig_cat.update_layout(template="plotly_dark")
     fig_cat.update_layout(showlegend=False, coloraxis_showscale=False,
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                          font_color="#94a3b8")
+                          font_color="#cbd5e1")
     st.plotly_chart(fig_cat, use_container_width=True)
 
     st.markdown("#### 📅 Monthly Trend")
@@ -92,8 +111,9 @@ with col_left:
         monthly_df, x="Month", y="Spend",
         markers=True, labels={"Spend": "Spend (₹)"}
     )
+    fig_monthly.update_layout(template="plotly_dark")
     fig_monthly.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                               font_color="#94a3b8")
+                               font_color="#cbd5e1")
     fig_monthly.update_traces(line_color="#6366f1", marker_color="#818cf8")
     st.plotly_chart(fig_monthly, use_container_width=True)
 
@@ -107,8 +127,9 @@ with col_right:
         weekly_df, x="Week", y="Cumulative",
         labels={"Cumulative": "Cumulative Spend (₹)"}
     )
+    fig_weekly.update_layout(template="plotly_dark")
     fig_weekly.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                              font_color="#94a3b8")
+                              font_color="#cbd5e1")
     fig_weekly.update_traces(line_color="#10b981", fillcolor="rgba(16,185,129,0.15)")
     st.plotly_chart(fig_weekly, use_container_width=True)
 
@@ -125,15 +146,17 @@ with col_right:
         orientation="h", labels={"Total": "Total (₹)"},
         color="Total", color_continuous_scale="Greens",
     )
+    fig_merch.update_layout(template="plotly_dark")
     fig_merch.update_layout(showlegend=False, coloraxis_showscale=False,
                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                             font_color="#94a3b8")
+                             font_color="#cbd5e1")
     st.plotly_chart(fig_merch, use_container_width=True)
 
 st.divider()
 
 # ── Gemini AI Insights ────────────────────────────────────────────────────────
-st.subheader("🧠 Gemini Financial Insights")
+st.markdown('<div class="section-label">AI insights</div>', unsafe_allow_html=True)
+st.subheader("Gemini Financial Insights")
 
 if st.button("✨ Generate AI Insights", type="primary"):
     with st.spinner("Analyzing your spending with Gemini 2.5 Flash..."):

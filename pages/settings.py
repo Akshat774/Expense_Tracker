@@ -14,6 +14,7 @@ from utils.database import (
     initialize_database, get_database_stats,
     reset_database, export_csv
 )
+from utils.ui import apply_theme, render_sidebar
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +23,29 @@ BACKUP_PATH = "expenses_backup.db"
 
 st.set_page_config(page_title="Settings | FinAI", page_icon="⚙️", layout="wide")
 initialize_database()
+apply_theme()
+render_sidebar(active_page="pages/settings.py")
 
-st.title("⚙️ System Settings")
-st.markdown("Manage your API connection, preferences, and database.")
+st.markdown(
+    """
+    <div class="page-shell">
+    <div class="hero-card">
+        <div class="hero-kicker">System control</div>
+        <h1 class="hero-title">Manage API health, preferences, and storage from one control surface.</h1>
+        <p class="hero-copy">
+            Keep the experience stable with quick diagnostics, configurable preferences, and safe
+            data management tools in a cleaner admin layout.
+        </p>
+    </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-st.divider()
+st.markdown('<div class="section-label">Diagnostics</div>', unsafe_allow_html=True)
 
 # ── System Status ─────────────────────────────────────────────────────────────
-st.subheader("🌐 System Status")
+st.subheader("System Status")
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -77,10 +93,10 @@ with col3:
             st.caption("⚠️ Set GOOGLE_API_KEY in your .env file.")
             st.caption("Get a free key at: https://aistudio.google.com/apikey")
 
-st.divider()
+st.markdown('<div class="section-label">Preferences</div>', unsafe_allow_html=True)
 
 # ── App Preferences ───────────────────────────────────────────────────────────
-st.subheader("⚙️ App Preferences")
+st.subheader("App Preferences")
 pref_col1, pref_col2 = st.columns(2)
 
 with pref_col1:
@@ -94,10 +110,10 @@ with pref_col2:
     ])
     st.toggle("Automatically split items matching single line invoices", value=True)
 
-st.divider()
+st.markdown('<div class="section-label">Database management</div>', unsafe_allow_html=True)
 
 # ── Database Management ───────────────────────────────────────────────────────
-st.subheader("💾 Database Management")
+st.subheader("Database Management")
 db_col1, db_col2 = st.columns(2)
 
 with db_col1:
@@ -160,10 +176,10 @@ with db_col2:
             except Exception as e:
                 st.error(f"Reset failed: {e}")
 
-st.divider()
+st.markdown('<div class="section-label">About</div>', unsafe_allow_html=True)
 
 # ── About ─────────────────────────────────────────────────────────────────────
-st.subheader("ℹ️ About FinAI")
+st.subheader("About FinAI")
 about_col1, about_col2 = st.columns([2, 1])
 with about_col1:
     st.markdown("""

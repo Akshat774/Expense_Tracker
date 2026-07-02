@@ -13,14 +13,30 @@ from utils.database import (
     update_expense, delete_expense, export_csv, get_database_stats
 )
 from utils.prompts import ALLOWED_CATEGORIES
+from utils.ui import apply_theme, render_sidebar
 
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="History | FinAI", page_icon="📜", layout="wide")
 initialize_database()
+apply_theme()
+render_sidebar(active_page="pages/expense_history.py")
 
-st.title("📜 Expense History")
-st.markdown("Filter, edit, export and inspect your past expenses.")
+st.markdown(
+    """
+    <div class="page-shell">
+    <div class="hero-card">
+        <div class="hero-kicker">Ledger review</div>
+        <h1 class="hero-title">Inspect, edit, and export your expense history with confidence.</h1>
+        <p class="hero-copy">
+            Filter transactions, inspect raw records, and manage your ledger in a dark interface that
+            keeps high-volume data readable.
+        </p>
+    </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ── KPI Cards ────────────────────────────────────────────────────────────────
 stats = get_database_stats()
@@ -32,6 +48,7 @@ date_range = (
     if stats["earliest"] and stats["latest"] else "—"
 )
 
+st.markdown('<div class="section-label">Summary</div>', unsafe_allow_html=True)
 k1, k2, k3 = st.columns(3)
 with k1:
     st.metric("Total Transactions", str(count))
@@ -53,7 +70,8 @@ all_months_raw = sorted({
 }, reverse=True)
 month_options = ["All Months"] + all_months_raw
 
-with st.expander("🔍 Search & Filter", expanded=True):
+st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
+with st.expander("Search & Filter", expanded=True):
     fc1, fc2, fc3 = st.columns(3)
     with fc1:
         search          = st.text_input("Search Merchant / Category / Address", placeholder="e.g. Swiggy, Food...")
@@ -91,7 +109,8 @@ sort_key = sort_key_map[sort_by]
 filtered.sort(key=lambda e: (e.get(sort_key) or ""), reverse=(sort_order == "Descending"))
 
 # ── Main ledger table ─────────────────────────────────────────────────────────
-st.markdown("### 📊 Transactions Ledger")
+st.markdown('<div class="section-label">Transactions</div>', unsafe_allow_html=True)
+st.subheader("Transactions Ledger")
 
 if not filtered:
     st.info("No expenses match your current filters.")
@@ -136,7 +155,8 @@ else:
 st.divider()
 
 # ── Per-row JSON viewer ───────────────────────────────────────────────────────
-st.markdown("### 🔍 Inspect Expense JSON")
+st.markdown('<div class="section-label">Record inspection</div>', unsafe_allow_html=True)
+st.subheader("Inspect Expense JSON")
 st.caption("Enter an expense ID to view the full raw record including line items and tax breakdown.")
 
 if filtered:
@@ -208,7 +228,8 @@ if filtered:
 st.divider()
 
 # ── Edit & Delete ─────────────────────────────────────────────────────────────
-st.markdown("### ✏️ Edit / Delete Expense")
+st.markdown('<div class="section-label">Management</div>', unsafe_allow_html=True)
+st.subheader("Edit / Delete Expense")
 
 if not filtered:
     st.info("No expenses to edit.")
@@ -278,7 +299,8 @@ else:
 st.divider()
 
 # ── Export ────────────────────────────────────────────────────────────────────
-st.subheader("📥 Export Data")
+st.markdown('<div class="section-label">Export</div>', unsafe_allow_html=True)
+st.subheader("Export Data")
 exp1, exp2 = st.columns(2)
 
 with exp1:
