@@ -1,5 +1,5 @@
 """
-FinAI Analytics — Real spending analytics powered by Pandas, Plotly, and Gemini.
+FinAI Analytics — Real spending analytics powered by Pandas, Plotly, and Gemini 2.5 Flash.
 """
 
 import streamlit as st
@@ -53,13 +53,13 @@ top_cat_pct = (
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 with kpi1:
     with st.container(border=True):
-        st.metric("Total Spent (All Time)", f"${total:,.2f}")
+        st.metric("Total Spent (All Time)", f"₹{total:,.2f}")
 with kpi2:
     with st.container(border=True):
         st.metric("Top Category", top_cat, f"{top_cat_pct:.0f}% of total")
 with kpi3:
     with st.container(border=True):
-        st.metric("Average Daily Spend", f"${avg_daily:,.2f}")
+        st.metric("Average Daily Spend", f"₹{avg_daily:,.2f}")
 with kpi4:
     with st.container(border=True):
         st.metric("Total Receipts", str(count))
@@ -70,7 +70,6 @@ st.divider()
 col_left, col_right = st.columns(2)
 
 with col_left:
-    # Spending by category
     st.markdown("#### 🏢 Spending by Category")
     cat_df = df.groupby("category")["total_amount"].sum().reset_index()
     cat_df.columns = ["Category", "Amount"]
@@ -78,36 +77,41 @@ with col_left:
     fig_cat = px.bar(
         cat_df, x="Category", y="Amount",
         color="Amount", color_continuous_scale="Blues",
-        labels={"Amount": "Amount ($)"},
+        labels={"Amount": "Amount (₹)"},
     )
-    fig_cat.update_layout(showlegend=False, coloraxis_showscale=False)
+    fig_cat.update_layout(showlegend=False, coloraxis_showscale=False,
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                          font_color="#94a3b8")
     st.plotly_chart(fig_cat, use_container_width=True)
 
-    # Monthly trend
     st.markdown("#### 📅 Monthly Trend")
     monthly_df = df.groupby("month")["total_amount"].sum().reset_index()
     monthly_df.columns = ["Month", "Spend"]
     monthly_df = monthly_df.sort_values("Month")
     fig_monthly = px.line(
         monthly_df, x="Month", y="Spend",
-        markers=True, labels={"Spend": "Spend ($)"}
+        markers=True, labels={"Spend": "Spend (₹)"}
     )
+    fig_monthly.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                               font_color="#94a3b8")
+    fig_monthly.update_traces(line_color="#6366f1", marker_color="#818cf8")
     st.plotly_chart(fig_monthly, use_container_width=True)
 
 with col_right:
-    # Weekly trend
-    st.markdown("#### 📈 Weekly Trend")
+    st.markdown("#### 📈 Weekly Cumulative Spend")
     weekly_df = df.groupby("week")["total_amount"].sum().reset_index()
     weekly_df.columns = ["Week", "Spend"]
     weekly_df = weekly_df.sort_values("Week")
     weekly_df["Cumulative"] = weekly_df["Spend"].cumsum()
     fig_weekly = px.area(
         weekly_df, x="Week", y="Cumulative",
-        labels={"Cumulative": "Cumulative Spend ($)"}
+        labels={"Cumulative": "Cumulative Spend (₹)"}
     )
+    fig_weekly.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                              font_color="#94a3b8")
+    fig_weekly.update_traces(line_color="#10b981", fillcolor="rgba(16,185,129,0.15)")
     st.plotly_chart(fig_weekly, use_container_width=True)
 
-    # Top merchants
     st.markdown("#### 🏆 Top Merchants")
     merchant_df = (
         df.groupby("merchant_name")["total_amount"].sum()
@@ -118,10 +122,12 @@ with col_right:
     merchant_df.columns = ["Merchant", "Total"]
     fig_merch = px.bar(
         merchant_df, x="Total", y="Merchant",
-        orientation="h", labels={"Total": "Total ($)"},
+        orientation="h", labels={"Total": "Total (₹)"},
         color="Total", color_continuous_scale="Greens",
     )
-    fig_merch.update_layout(showlegend=False, coloraxis_showscale=False)
+    fig_merch.update_layout(showlegend=False, coloraxis_showscale=False,
+                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                             font_color="#94a3b8")
     st.plotly_chart(fig_merch, use_container_width=True)
 
 st.divider()
@@ -130,49 +136,25 @@ st.divider()
 st.subheader("🧠 Gemini Financial Insights")
 
 if st.button("✨ Generate AI Insights", type="primary"):
-    with st.spinner("Analyzing your spending with Gemini..."):
+    with st.spinner("Analyzing your spending with Gemini 2.5 Flash..."):
         try:
-            from huggingface_hub import InferenceClient
-            import os
-            from dotenv import load_dotenv
-            load_dotenv()
+            from utils.gemini_client import generate_insights
 
-            # Build a summary for the model
             summary_rows = df[["transaction_date", "merchant_name", "category", "total_amount"]].copy()
             summary_rows["transaction_date"] = summary_rows["transaction_date"].astype(str)
             summary_json = summary_rows.tail(50).to_dict(orient="records")
 
-            prompt = f"""
-You are a personal finance advisor.
-
-Analyze the following expense data and provide:
-1. Key spending patterns (2-3 bullet points)
-2. Any anomalies or concerns
-3. Actionable savings tips (2-3 specific suggestions)
-
-Expense data (most recent 50 transactions):
-{json.dumps(summary_json, indent=2)}
-
-Keep the response concise and practical.
-"""
-            client = InferenceClient(
-                model="Qwen/Qwen2.5-VL-7B-Instruct",
-                token=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
-            )
-            response = client.chat_completion(
-                messages=[
-                    {"role": "system", "content": "You are a personal finance advisor."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1024,
-                temperature=0.3,
-            )
-            reply = response.choices[0].message.content
+            reply = generate_insights(summary_json)
 
             with st.container(border=True):
                 st.markdown(reply)
-                st.caption("Insights generated by Qwen2.5-VL-7B-Instruct based on your transaction history.")
+                st.caption("Insights generated by Gemini 2.5 Flash based on your transaction history.")
 
+        except EnvironmentError as e:
+            st.error(
+                "🔑 **GOOGLE_API_KEY not found.**\n\n"
+                "Add it to your `.env` file:\n```\nGOOGLE_API_KEY=your_key_here\n```"
+            )
         except Exception as e:
             st.error(f"Could not generate insights: {e}")
 else:

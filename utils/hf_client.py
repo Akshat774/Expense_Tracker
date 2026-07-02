@@ -1,18 +1,29 @@
 """
 HuggingFace Inference API client for FinAI.
 
-Supports multiple vision-language models. Set MODEL_ID to switch.
-Image message format is built per-model since different models require
-different prompt structures (e.g. Gemma-3 requires an "<image>" placeholder
-token in the text, while Qwen accepts image and text as separate parts).
+Resilience strategy
+--------------------
+Instead of hardcoding ONE provider (which breaks the moment that provider
+doesn't serve the model, is down, or rejects your key), this client tries a
+PRIORITY LIST of known-good (model, provider) pairs in order. The first one
+that works wins; failures are logged and the next candidate is tried
+automatically. If every candidate fails, you get one clear error that lists
+exactly what was tried and why each attempt failed — never a bare
+"internal server error".
 
-Supported models (tested):
-  - google/gemma-3-27b-it        (requires <image> placeholder in text)
-  - Qwen/Qwen2.5-VL-72B-Instruct (image and text as separate chunks)
-  - Qwen/Qwen3-VL-8B-Instruct
+Supported providers per candidate use their OWN api key:
+    hf-inference / auto  → HUGGINGFACEHUB_API_TOKEN  (hf_...)
+    hyperbolic            → HYPERBOLIC_API_KEY
+    deepinfra              → DEEPINFRA_API_KEY
+    together                → TOGETHER_API_KEY
+    fireworks-ai             → FIREWORKS_API_KEY
+Only set the keys for providers you actually have accounts on — missing
+keys are skipped silently, not treated as errors, unless ALL candidates
+have no usable key (then you get a clear setup message).
 """
 
 import os
+import re
 import json
 import base64
 import logging
@@ -21,6 +32,7 @@ from typing import Optional, Any
 
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
+from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.inference._generated.types.chat_completion import (
     ChatCompletionInputResponseFormatJSONSchema,
     ChatCompletionInputJSONSchema,
@@ -34,26 +46,36 @@ from utils.schema import ReceiptExtraction
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# ── Model configuration ─────────────────────────────────────────────────────
-# Qwen2.5-VL-7B: best free vision model on HF — fast, accurate, no approval needed.
-# provider="auto" lets the HF SDK pick whichever backend currently has the model
-# loaded (deepinfra, together, etc.) so you never get "model not supported" errors.
-MODEL_ID   = "Qwen/Qwen2.5-VL-7B-Instruct"
-HF_PROVIDER = "hyperbolic"
+
+# ── Candidate (model, provider) chain ───────────────────────────────────────
+#
+# Ordered by: speed, reliability, and how widely the provider serves Qwen-VL.
+# Add/remove/reorder entries here — nothing else in this file needs to change.
+#
+CANDIDATES = [
+    # (model_id, provider, env_var_for_key)
+    ("Qwen/Qwen2.5-VL-7B-Instruct", "hyperbolic", "HYPERBOLIC_API_KEY"),
+    ("Qwen/Qwen2.5-VL-7B-Instruct", "together",   "TOGETHER_API_KEY"),
+    ("Qwen/Qwen2.5-VL-7B-Instruct", "deepinfra",  "DEEPINFRA_API_KEY"),
+    ("Qwen/Qwen2.5-VL-7B-Instruct", "auto",       "HUGGINGFACEHUB_API_TOKEN"),
+    ("Qwen/Qwen2.5-VL-7B-Instruct", "hf-inference", "HUGGINGFACEHUB_API_TOKEN"),
+]
+
+# Last successful candidate is cached for the rest of the process so we don't
+# re-probe dead providers on every single request.
+_last_working: Optional[tuple] = None
 
 
-# ── Schema cleaning ──────────────────────────────────────────────────────────
+# ── Schema cleaning (shared across all providers) ───────────────────────────
 
 def _clean_schema(schema: Any) -> Any:
     """
-    Recursively strip 'default' and 'title' keys, and unwrap
-    anyOf: [{"type": X}, {"type": "null"}]  →  {"type": X}.
-    This is required because HuggingFace's structured output endpoint
-    rejects schemas that contain the 'default' keyword.
+    Strip 'default'/'title' keys and unwrap anyOf:[{type:X},{type:null}] →
+    {type:X}. HF structured-output endpoints reject schemas containing
+    'default', so this must run on every Pydantic-generated schema.
     """
     if not isinstance(schema, dict):
         return schema
-
     result = {}
     for k, v in schema.items():
         if k in ("default", "title"):
@@ -68,27 +90,18 @@ def _clean_schema(schema: Any) -> Any:
 
 
 def _build_receipt_schema() -> dict:
-    """
-    Build a clean JSON schema dict from the ReceiptExtraction Pydantic model,
-    with all $refs inlined and no forbidden keywords.
-    """
     raw = ReceiptExtraction.model_json_schema()
     cleaned = _clean_schema(raw)
-
-    # Inline $defs so the schema is self-contained
     defs = cleaned.pop("$defs", {})
     schema_str = json.dumps(cleaned)
     for name, def_schema in defs.items():
-        inlined = json.dumps(_clean_schema(def_schema))[1:-1]  # strip outer {}
+        inlined = json.dumps(_clean_schema(def_schema))[1:-1]
         schema_str = schema_str.replace(f'"$ref": "#/$defs/{name}"', inlined)
-
     return json.loads(schema_str)
 
 
 RECEIPT_JSON_SCHEMA = _build_receipt_schema()
 
-
-# ── Response format ──────────────────────────────────────────────────────────
 
 def _json_response_format() -> ChatCompletionInputResponseFormatJSONSchema:
     return ChatCompletionInputResponseFormatJSONSchema(
@@ -102,121 +115,66 @@ def _json_response_format() -> ChatCompletionInputResponseFormatJSONSchema:
     )
 
 
-# ── Client factory ───────────────────────────────────────────────────────────
-
-def _get_client() -> InferenceClient:
-    token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-    if not token:
-        raise EnvironmentError("HUGGINGFACEHUB_API_TOKEN not set in .env")
-    return InferenceClient(
-        model=MODEL_ID,
-        provider=HF_PROVIDER,   # "auto" — SDK picks deepinfra/together/etc dynamically
-        token=token,
-        timeout=45,             # Qwen2.5-VL-7B on GPU responds in <20s typically
-    )
-
-
 # ── Model-aware image message builder ───────────────────────────────────────
 
 def _requires_image_placeholder(model_id: str) -> bool:
-    """
-    Gemma-3 (and other models using the same processor) require the text
-    prompt to contain exactly one "<image>" token per image sent.
-    Qwen-VL and similar models do NOT use this — they accept image_url
-    and text as separate content chunks with no placeholder needed.
-    """
-    model_lower = model_id.lower()
-    # Gemma-3 needs "<image>" in the text prompt.
-    # Qwen-VL models do NOT — they use image_url as a separate content chunk.
-    return "gemma" in model_lower
+    """Gemma-3 needs a literal '<image>' token in the text; Qwen-VL does not."""
+    return "gemma" in model_id.lower()
 
 
-def _build_image_messages(data_url: str, prompt: str) -> list:
-    """
-    Build the messages list for a vision request, adapting to MODEL_ID.
-
-    Gemma-3 format:
-        user content = [image_url chunk, text chunk with "<image>\n\n{prompt}"]
-
-    Qwen / default format:
-        user content = [image_url chunk, text chunk with just the prompt]
-    """
+def _build_image_messages(model_id: str, data_url: str, prompt: str) -> list:
     image_chunk = ChatCompletionInputMessageChunk(
         type="image_url",
         image_url=ChatCompletionInputURL(url=data_url),
     )
-
-    if _requires_image_placeholder(MODEL_ID):
-        # Gemma-3: text must contain exactly one "<image>" marker
-        text_chunk = ChatCompletionInputMessageChunk(
-            type="text",
-            text=f"<image>\n\n{prompt}",
-        )
-    else:
-        # Qwen and others: plain text, no placeholder needed
-        text_chunk = ChatCompletionInputMessageChunk(
-            type="text",
-            text=prompt,
-        )
-
+    text = f"<image>\n\n{prompt}" if _requires_image_placeholder(model_id) else prompt
+    text_chunk = ChatCompletionInputMessageChunk(type="text", text=text)
     return [
         {"role": "system", "content": RECEIPT_SYSTEM_INSTRUCTION},
         {"role": "user", "content": [image_chunk, text_chunk]},
     ]
 
 
-# ── Response parsing ─────────────────────────────────────────────────────────
+# ── JSON truncation repair ──────────────────────────────────────────────────
 
 def _repair_truncated_json(text: str) -> str:
     """
-    Repair JSON truncated mid-stream by max_tokens.
-
-    Three-stage approach:
-    1. Try to find the longest valid JSON prefix using raw_decode.
-    2. Walk back to the last complete OBJECT boundary (closing brace/bracket
-       that is NOT inside an incomplete parent object with a dangling key).
-    3. Close any remaining unclosed braces/brackets.
+    Repair JSON truncated mid-stream by max_tokens. Finds the longest valid
+    JSON prefix by trying every "safe" boundary (closing quote/brace/bracket)
+    from the end backwards, closing remaining open structures, and validating
+    with json.loads at each attempt.
     """
-    import re
-
-    # Stage 1: find longest prefix that raw_decode accepts
-    decoder = json.JSONDecoder()
-    best = None
-    # Try progressively shorter versions by stripping from the right
-    # at each potential boundary character
     boundaries = []
     in_str = False
     i = 0
     while i < len(text):
         c = text[i]
         if in_str:
-            if c == '\\' and i+1 < len(text):
+            if c == '\\' and i + 1 < len(text):
                 i += 2
                 continue
             if c == '"':
                 in_str = False
-                boundaries.append(i+1)
+                boundaries.append(i + 1)
         else:
             if c == '"':
                 in_str = True
             elif c in ('}', ']'):
-                boundaries.append(i+1)
+                boundaries.append(i + 1)
         i += 1
 
     for pos in reversed(boundaries):
         candidate = text[:pos].rstrip().rstrip(',')
-        # Close open structures
-        d_brace   = candidate.count('{') - candidate.count('}')
+        d_brace = candidate.count('{') - candidate.count('}')
         d_bracket = candidate.count('[') - candidate.count(']')
-        closed = candidate + (']' * max(0,d_bracket)) + ('}' * max(0,d_brace))
+        closed = candidate + (']' * max(0, d_bracket)) + ('}' * max(0, d_brace))
         try:
             json.loads(closed)
             return closed
         except json.JSONDecodeError:
             continue
 
-    # Stage 2 fallback: strip everything after last top-level comma or colon issue
-    # Find last } or ] at depth 1 (direct child of root object/array)
+    # Fallback: cut at the last depth-1 closing brace/bracket
     depth = 0
     in_str2 = False
     last_good = 0
@@ -224,7 +182,7 @@ def _repair_truncated_json(text: str) -> str:
     while i < len(text):
         c = text[i]
         if in_str2:
-            if c == '\\' and i+1 < len(text):
+            if c == '\\' and i + 1 < len(text):
                 i += 2
                 continue
             if c == '"':
@@ -232,9 +190,9 @@ def _repair_truncated_json(text: str) -> str:
         else:
             if c == '"':
                 in_str2 = True
-            elif c in ('{','['):
+            elif c in ('{', '['):
                 depth += 1
-            elif c in ('}',']'):
+            elif c in ('}', ']'):
                 depth -= 1
                 if depth == 1:
                     last_good = i + 1
@@ -242,32 +200,30 @@ def _repair_truncated_json(text: str) -> str:
 
     if last_good > 0:
         candidate = text[:last_good].rstrip().rstrip(',')
-        d_brace   = candidate.count('{') - candidate.count('}')
+        d_brace = candidate.count('{') - candidate.count('}')
         d_bracket = candidate.count('[') - candidate.count(']')
-        closed = candidate + (']' * max(0,d_bracket)) + ('}' * max(0,d_brace))
+        closed = candidate + (']' * max(0, d_bracket)) + ('}' * max(0, d_brace))
         try:
             json.loads(closed)
             return closed
         except json.JSONDecodeError:
             pass
 
-    return '{}'  # total fallback — empty object
+    return '{}'
 
 
 def _parse_response(content: str) -> ReceiptExtraction:
-    """Parse the model JSON into a validated ReceiptExtraction with auto-corrections."""
+    """Parse model JSON into a validated ReceiptExtraction with auto-corrections."""
     text = content.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-    # Try clean parse first; if it fails, attempt truncation repair
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
         logger.warning(f"JSON parse failed ({e}), attempting truncation repair...")
         try:
-            repaired = _repair_truncated_json(text)
-            data = json.loads(repaired)
+            data = json.loads(_repair_truncated_json(text))
             logger.info("Truncation repair succeeded.")
         except json.JSONDecodeError:
             raise ValueError(
@@ -275,27 +231,21 @@ def _parse_response(content: str) -> ReceiptExtraction:
                 f"Raw content (first 300 chars): {text[:300]!r}"
             )
 
-    # Safe fallbacks
     data.setdefault("line_items", [])
     data.setdefault("tax_breakdown", [])
     data.setdefault("confidence_score", 0.0)
 
-    # Discount must always be stored as a positive number
     discount = data.get("discount_amount")
     if discount is not None and discount < 0:
         data["discount_amount"] = abs(discount)
 
-    # Auto-sum tax_amount from breakdown components if missing
     if data.get("tax_amount") is None and data.get("tax_breakdown"):
         total_tax = sum(
-            t.get("amount") or 0.0
-            for t in data["tax_breakdown"]
-            if isinstance(t, dict)
+            t.get("amount") or 0.0 for t in data["tax_breakdown"] if isinstance(t, dict)
         )
         if total_tax:
             data["tax_amount"] = round(total_tax, 2)
 
-    # Auto-compute total if missing but components are present
     if data.get("total_amount") is None:
         subtotal = data.get("subtotal") or 0.0
         disc = data.get("discount_amount") or 0.0
@@ -306,91 +256,153 @@ def _parse_response(content: str) -> ReceiptExtraction:
     return ReceiptExtraction(**data)
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Error classification ────────────────────────────────────────────────────
 
-def extract_from_image(
-    image_buffer: BytesIO,
-    extra_context: str = "",
-) -> ReceiptExtraction:
+def _classify_error(exc: Exception) -> str:
+    """Turn a raw exception into a short, human-readable reason."""
+    msg = str(exc)
+    low = msg.lower()
+    if isinstance(exc, HfHubHTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 401 or "401" in low:
+            return "invalid API key"
+        if status == 403 or "403" in low:
+            return "access forbidden (key lacks permission for this model)"
+        if status == 404 or "not found" in low:
+            return "model not found on this provider"
+        if status == 422 or "unprocessable" in low:
+            return "request rejected (bad schema or unsupported param)"
+        if status == 429 or "rate limit" in low:
+            return "rate limited"
+        if status and status >= 500:
+            return f"provider internal server error ({status})"
+        return f"HTTP error ({status or '?'})"
+    if "timeout" in low or "timed out" in low:
+        return "request timed out"
+    if "model id" in low and "supported" in low:
+        return "model/provider mismatch"
+    if "connection" in low:
+        return "connection error"
+    return msg[:120]
+
+
+# ── Client factory with fallback chain ──────────────────────────────────────
+
+def _try_candidate(model_id: str, provider: str, env_var: str) -> Optional[InferenceClient]:
+    api_key = os.getenv(env_var)
+    if not api_key:
+        return None
+    return InferenceClient(
+        model=model_id,
+        provider=provider,
+        token=api_key,
+        timeout=45,
+    )
+
+
+def _call_with_fallback(build_messages_fn) -> tuple:
     """
-    Send a preprocessed JPEG image to the configured vision model.
-    Image is encoded as a base64 data URL. Message format is built
-    per-model (e.g. Gemma-3 needs an <image> placeholder in the text).
+    Try each candidate in order. build_messages_fn(model_id) -> messages list.
+    Returns (response, model_id, provider) from the first candidate that
+    succeeds. Raises a single consolidated error if every candidate fails.
     """
-    try:
-        client = _get_client()
-        prompt = build_user_prompt(extra_context)
+    global _last_working
 
-        # Encode image as base64 data URL
-        image_bytes = image_buffer.read()
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        data_url = f"data:image/jpeg;base64,{b64}"
+    ordered = list(CANDIDATES)
+    # Try the last known-working candidate first to avoid re-probing dead ones
+    if _last_working and _last_working in ordered:
+        ordered.remove(_last_working)
+        ordered.insert(0, _last_working)
 
-        messages = _build_image_messages(data_url, prompt)
+    attempts_log = []
+    any_key_found = False
 
-        response = client.chat_completion(
-            messages=messages,
-            response_format=_json_response_format(),
-            max_tokens=8192,
-            temperature=0.1,
+    for model_id, provider, env_var in ordered:
+        client = _try_candidate(model_id, provider, env_var)
+        if client is None:
+            attempts_log.append(f"  • {provider} ({model_id}): skipped — {env_var} not set in .env")
+            continue
+
+        any_key_found = True
+        try:
+            messages = build_messages_fn(model_id)
+            response = client.chat_completion(
+                messages=messages,
+                response_format=_json_response_format(),
+                max_tokens=8192,
+                temperature=0.1,
+            )
+            _last_working = (model_id, provider, env_var)
+            logger.info(f"Extraction succeeded via provider={provider}, model={model_id}")
+            return response, model_id, provider
+
+        except Exception as e:
+            reason = _classify_error(e)
+            attempts_log.append(f"  • {provider} ({model_id}): FAILED — {reason}")
+            logger.warning(f"Provider '{provider}' failed: {reason}")
+            continue
+
+    if not any_key_found:
+        raise EnvironmentError(
+            "No API key found for any configured provider.\n"
+            "Add at least ONE of these to your .env file:\n"
+            "  HYPERBOLIC_API_KEY=...\n"
+            "  TOGETHER_API_KEY=...\n"
+            "  DEEPINFRA_API_KEY=...\n"
+            "  HUGGINGFACEHUB_API_TOKEN=hf_...\n"
         )
 
-        choice = response.choices[0]
-        content = choice.message.content
-        if not content:
-            raise ValueError("Model returned empty content.")
-        finish = getattr(choice, "finish_reason", None)
-        if finish == "length":
-            logger.warning(
-                "Model hit max_tokens — response was truncated. "
-                "Attempting JSON repair..."
-            )
-        return _parse_response(content)
-
-    except Exception as e:
-        logger.error(f"extract_from_image failed: {e}")
-        raise
+    raise RuntimeError(
+        "All AI providers failed to respond. Attempts:\n" + "\n".join(attempts_log)
+    )
 
 
-def extract_from_text(
-    text: str,
-    extra_context: str = "",
-) -> ReceiptExtraction:
+# ── Public API ───────────────────────────────────────────────────────────────
+
+def extract_from_image(image_buffer: BytesIO, extra_context: str = "") -> ReceiptExtraction:
     """
-    Send plain receipt text to Qwen3-VL and return a validated ReceiptExtraction.
+    Send a preprocessed JPEG image to the first working vision provider.
+    Tries multiple (model, provider) pairs automatically on failure.
     """
-    try:
-        client = _get_client()
-        prompt = build_user_prompt(extra_context)
-        full_prompt = f"{prompt}\n\nReceipt text:\n{text}"
+    prompt = build_user_prompt(extra_context)
+    image_bytes = image_buffer.read()
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64}"
 
-        messages = [
+    def build(model_id: str):
+        return _build_image_messages(model_id, data_url, prompt)
+
+    response, model_id, provider = _call_with_fallback(build)
+
+    choice = response.choices[0]
+    content = choice.message.content
+    if not content:
+        raise ValueError(f"Model '{model_id}' on '{provider}' returned empty content.")
+    if getattr(choice, "finish_reason", None) == "length":
+        logger.warning("Response truncated by max_tokens — attempting JSON repair.")
+    return _parse_response(content)
+
+
+def extract_from_text(text: str, extra_context: str = "") -> ReceiptExtraction:
+    """Send plain receipt text to the first working provider."""
+    prompt = build_user_prompt(extra_context)
+    full_prompt = f"{prompt}\n\nReceipt text:\n{text}"
+
+    def build(model_id: str):
+        return [
             {"role": "system", "content": RECEIPT_SYSTEM_INSTRUCTION},
             {"role": "user", "content": full_prompt},
         ]
 
-        response = client.chat_completion(
-            messages=messages,
-            response_format=_json_response_format(),
-            max_tokens=8192,
-            temperature=0.1,
-        )
+    response, model_id, provider = _call_with_fallback(build)
 
-        choice = response.choices[0]
-        content = choice.message.content
-        if not content:
-            raise ValueError("Model returned empty content.")
-        finish = getattr(choice, "finish_reason", None)
-        if finish == "length":
-            logger.warning(
-                "Model hit max_tokens — response was truncated. "
-                "Attempting JSON repair..."
-            )
-        return _parse_response(content)
-
-    except Exception as e:
-        logger.error(f"extract_from_text failed: {e}")
-        raise
+    choice = response.choices[0]
+    content = choice.message.content
+    if not content:
+        raise ValueError(f"Model '{model_id}' on '{provider}' returned empty content.")
+    if getattr(choice, "finish_reason", None) == "length":
+        logger.warning("Response truncated by max_tokens — attempting JSON repair.")
+    return _parse_response(content)
 
 
 def extract_receipt(
@@ -407,18 +419,32 @@ def extract_receipt(
 
 
 def health_check() -> dict:
-    """Ping the model with a simple text prompt to verify connectivity."""
-    try:
-        client = _get_client()
-        response = client.chat_completion(
-            messages=[{"role": "user", "content": "Reply with the single word: OK"}],
-            max_tokens=10,
-        )
-        reply = response.choices[0].message.content.strip()
-        return {
-            "ok": True,
-            "model": MODEL_ID,
-            "message": f"Connected. Model replied: {reply}",
-        }
-    except Exception as e:
-        return {"ok": False, "model": MODEL_ID, "message": str(e)}
+    """
+    Ping each configured provider in order and report which ones are alive.
+    Returns ok=True if at least one provider responds.
+    """
+    results = []
+    working_any = False
+
+    for model_id, provider, env_var in CANDIDATES:
+        api_key = os.getenv(env_var)
+        if not api_key:
+            results.append(f"⬜ {provider}: no key ({env_var} not set)")
+            continue
+        try:
+            client = InferenceClient(model=model_id, provider=provider, token=api_key, timeout=20)
+            resp = client.chat_completion(
+                messages=[{"role": "user", "content": "Reply with the single word: OK"}],
+                max_tokens=10,
+            )
+            reply = resp.choices[0].message.content.strip()
+            results.append(f"🟢 {provider} ({model_id}): {reply}")
+            working_any = True
+        except Exception as e:
+            results.append(f"🔴 {provider} ({model_id}): {_classify_error(e)}")
+
+    return {
+        "ok": working_any,
+        "model": CANDIDATES[0][0],
+        "message": "\n".join(results),
+    }

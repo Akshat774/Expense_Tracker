@@ -1,5 +1,6 @@
 """
-FinAI Settings — API health checks, database management, backup/restore, and preferences.
+FinAI Settings — API health checks, database management, backup/restore.
+Powered by Google Gemini 2.5 Flash via Google AI Studio.
 """
 
 import streamlit as st
@@ -23,7 +24,7 @@ st.set_page_config(page_title="Settings | FinAI", page_icon="⚙️", layout="wi
 initialize_database()
 
 st.title("⚙️ System Settings")
-st.markdown("Manage your API keys, preferences, and database configurations.")
+st.markdown("Manage your API connection, preferences, and database.")
 
 st.divider()
 
@@ -34,23 +35,23 @@ col1, col2, col3 = st.columns(3)
 with col1:
     with st.container(border=True):
         if st.button("🔄 Check Gemini API", use_container_width=True):
-            with st.spinner("Pinging Gemini..."):
+            with st.spinner("Pinging Gemini 2.5 Flash..."):
                 try:
-                    from utils.hf_client import health_check
+                    from utils.gemini_client import health_check
                     result = health_check()
-                    if result["ok"]:
-                        st.session_state["ai_status"] = ("🟢 Connected", result["message"])
-                    else:
-                        st.session_state["ai_status"] = ("🔴 Disconnected", result["message"])
+                    st.session_state["ai_status"] = (
+                        "🟢 Connected" if result["ok"] else "🔴 Disconnected",
+                        result["message"]
+                    )
                 except Exception as e:
                     st.session_state["ai_status"] = ("🔴 Error", str(e))
 
         ai_val, ai_msg = st.session_state.get("ai_status", ("⬜ Not Checked", ""))
-        st.metric(label="AI Model Status", value=ai_val)
+        st.metric(label="Gemini API Status", value=ai_val)
         if ai_msg:
             st.caption(ai_msg)
         else:
-            st.caption("Model: Qwen/Qwen2.5-VL-7B-Instruct · Provider: auto (deepinfra/together) · HuggingFace Inference API.")
+            st.caption("Model: `gemini-2.5-flash` via Google AI Studio.")
 
 with col2:
     with st.container(border=True):
@@ -62,7 +63,7 @@ with col2:
         except Exception:
             sqlite_ver = "?"
         st.metric(label="Database Status", value=db_status, delta=f"SQLite v{sqlite_ver}")
-        st.caption(f"{stats['count']} records · ${stats['total']:,.2f} total")
+        st.caption(f"{stats['count']} records · ₹{stats['total']:,.2f} total")
 
 with col3:
     with st.container(border=True):
@@ -70,10 +71,11 @@ with col3:
         env_status = "🟢 Verified" if api_key else "🔴 Missing"
         st.metric(label="Environment Variables", value=env_status)
         if api_key:
-            masked = api_key[:6] + "…" + api_key[-4:]
+            masked = api_key[:8] + "…" + api_key[-4:]
             st.caption(f"GOOGLE_API_KEY loaded: `{masked}`")
         else:
             st.caption("⚠️ Set GOOGLE_API_KEY in your .env file.")
+            st.caption("Get a free key at: https://aistudio.google.com/apikey")
 
 st.divider()
 
@@ -82,13 +84,13 @@ st.subheader("⚙️ App Preferences")
 pref_col1, pref_col2 = st.columns(2)
 
 with pref_col1:
-    currency = st.selectbox("Base Currency Symbol", ["USD ($)", "EUR (€)", "GBP (£)", "INR (₹)"])
+    currency = st.selectbox("Base Currency Symbol", ["INR (₹)", "USD ($)", "EUR (€)", "GBP (£)"])
     rows_per_page = st.slider("Rows per page in history view", min_value=10, max_value=100, value=25)
 
 with pref_col2:
-    ai_mode = st.radio("Gemini Accuracy Mode", [
-        "Gemini Flash (Faster response times)",
-        "Gemini Pro (Deep, high-accuracy processing)"
+    st.radio("Gemini Mode", [
+        "gemini-2.5-flash (Fast, recommended)",
+        "gemini-2.5-pro (Deeper accuracy, slower)",
     ])
     st.toggle("Automatically split items matching single line invoices", value=True)
 
@@ -166,12 +168,14 @@ about_col1, about_col2 = st.columns([2, 1])
 with about_col1:
     st.markdown("""
     * **App Version:** v1.0.0
-    * **AI Engine:** `Qwen/Qwen2.5-VL-7B-Instruct` via HuggingFace Inference API (provider: auto)
+    * **AI Engine:** `gemini-2.5-flash` via Google AI Studio
+    * **SDK:** `google-genai` v2+
     * **UI Framework:** Streamlit
-    * **Database:** SQLite via Python `sqlite3`
+    * **Database:** SQLite
     """)
 with about_col2:
     st.markdown(
-        "<div style='text-align: right; color: gray; padding-top: 20px;'>Released under the MIT License.</div>",
+        "<div style='text-align:right;color:#475569;padding-top:20px;'>"
+        "Released under the MIT License.</div>",
         unsafe_allow_html=True
     )
